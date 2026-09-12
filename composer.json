@@ -1,0 +1,19 @@
+{
+    "name": "samwang168168/claude-customer-service",
+    "description": "客服系統 Gemini -> Claude 遷移：三層 prompt caching 分層 + Gemini 相容轉接層",
+    "type": "project",
+    "require": {
+        "php": "^8.1",
+        "anthropic-ai/sdk": "^0.48",
+        "guzzlehttp/guzzle": "^7.8"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\Claude\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable"
+}
