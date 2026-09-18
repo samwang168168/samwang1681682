@@ -174,47 +174,81 @@ $service->cacheStats();    // 累計，適合掛在 metrics 端點上
 
 ## 通訊軟體通道：Telegram / Facebook
 
-客服後端做好之後，訊息要從哪裡進來？`.claude/skills/` 底下有三支
-Claude Code skill，把 n8n 串接這兩個平台的實作、限制與踩雷點都寫進去了：
-
-| Skill | 管什麼 |
-|---|---|
-| `n8n-api-integration` | 共用地基：webhook 接收與回應、credential、重試退避、冪等去重、workflow JSON 手寫格式、除錯順序 |
-| `n8n-telegram` | Telegram Bot API：收發訊息、inline 按鈕、4096 字切段、MarkdownV2 跳脫、429 `retry_after`、廣播節流 |
-| `n8n-facebook` | Meta：`hub.challenge` 驗證、`X-Hub-Signature-256` 驗簽、24 小時訊息視窗與 message tag、粉專留言自動回覆 |
-
-每支都附可直接匯入的 n8n workflow：
+客服後端做好之後，訊息要從哪裡進來？`src/Channel` + `src/Flow` 是**自己實作**的
+一套通道層，不依賴 n8n、Zapier 或任何外部自動化平台。
+零第三方套件（只用 ext-curl / ext-hash），沒裝 composer 也跑得起來。
 
 ```
-.claude/skills/n8n-telegram/workflows/telegram-customer-service.json
-.claude/skills/n8n-telegram/workflows/telegram-broadcast.json
-.claude/skills/n8n-facebook/workflows/messenger-customer-service.json
-.claude/skills/n8n-facebook/workflows/facebook-comment-autoreply.json
+webhook 進來
+   │
+   ▼
+WebhookHandler ─── challenge()  平台的網址驗證握手（Meta 的 hub.challenge）
+   │           └── verify()     驗簽，失敗就 401 結束
+   │           └── parse()      攤平成 InboundMessage[]
+   │
+   ▼  先回 200，才開始做事（Meta 只等 20 秒）
+Flow
+   ├── Dedupe        webhook 一定會重送，這步不是防呆是必要
+   ├── tap(打字中)    旁支：失敗不影響主線
+   ├── Map(問 Claude) 可設重試；失敗放行，由下一步給 fallback
+   ├── SplitText     Telegram 4096 / Messenger 2000，超過整則會 400
+   └── SendMessages  節流 + 照平台指定秒數退避 + 三類結果分開處理
 ```
 
-四個 workflow 都打同一支後端：`examples/n8n_webhook.php`。它收下 n8n 的 JSON，
-丟進 `ClaudeCustomerService`，回一個 `{"reply": "..."}`。
+`Channel` 介面只有五個動作，上層流程完全不必知道訊息從哪個平台來 ——
+要加 LINE / WhatsApp / Discord 就是再實作一個類別，flow 一行都不用改。
+
+### 跑起來
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... CS_SHARED_SECRET=$(openssl rand -hex 32) \
+# 兩個通道共用一條 flow
+ANTHROPIC_API_KEY=sk-ant-... \
+TELEGRAM_BOT_TOKEN=123:AA... TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 32) \
+PAGE_ACCESS_TOKEN=EAA... META_APP_SECRET=... META_VERIFY_TOKEN=... \
   php -S 0.0.0.0:8080 -t examples
+
+# 廣播（--dry-run 不連外網，示範三種結果的差異）
+php examples/broadcast.php --dry-run
 ```
 
-n8n 那邊設兩個環境變數 `CS_BACKEND_URL`、`CS_SHARED_SECRET`（與上面同一組），
-再照各 skill 的說明填 bot token / Page Access Token 即可。
+平台後台填的 webhook 網址：
 
-**快取分層在這裡一樣成立**：`systemPrompt` 與 `companyKnowledge` 是凍結的兩層，
-通道別（telegram / messenger）走 `turnInstruction`，不會動到已快取的前綴 ——
-所以 Telegram 與 Messenger 的流量**讀的是同一份公司知識庫快取**。
+```
+Telegram   https://你的網域/channel_server.php/telegram
+Messenger  https://你的網域/channel_server.php/messenger
+```
 
-匯入前記得先驗一次：
+### 快取分層在這裡一樣成立
+
+`systemPrompt` 與 `companyKnowledge` 是凍結的兩層，通道別（telegram / messenger）
+走 `turnInstruction`，不會動到已快取的前綴 ——
+所以 **Telegram 與 Messenger 的流量讀的是同一份公司知識庫快取**。
+
+### 六個一定會踩到的坑
+
+都已經處理掉了，改動時不要不小心弄壞：
+
+1. **Telegram 要用 `chat.id`，不是 `from.id`** —— 群組裡用錯會把回覆私訊給發話者。
+2. **Messenger 的 `is_echo` 一定要濾掉** —— 那是自己送出去的回音，不濾掉 bot 會跟自己無限對話。
+3. **驗簽必須對原始位元組算** —— 先 decode 再 encode 回去的 HMAC 對不上，
+   而且是「有中文就壞、純英文就好」這種時好時壞的症狀。
+4. **webhook 一定會重送** —— Meta 連續收不到 200 還會直接停用你的 webhook。
+   去重少了，使用者收到兩次回覆，而你付兩次 API 錢。
+5. **403 和 429 的處理完全相反** —— 403 是被封鎖（要從名單移除），429 是限流（要等再送）。
+   混在一起會讓每次廣播都把配額燒在同一批封鎖名單上。
+6. **先回 200 再做事** —— 平台的逾時遠比 LLM 的回應時間短。
+
+### 驗證
 
 ```bash
-node .claude/skills/n8n-api-integration/scripts/lint-workflow.mjs \
-  .claude/skills/n8n-*/workflows/*.json
+php tools/test_channels.php
 ```
 
-工具腳本本身也各自帶自我測試（`node <檔案>` 直接跑）。
+53 項，不花錢、不連外網、不需要 composer。它斷言的是**真正送出去的 wire payload**
+而不只是回傳值 —— 通訊軟體整合最常見的錯是「body 少一個必填欄位」，
+那種錯從回傳值看一切正常，只有看 wire payload 才抓得到。
+
+更多細節在 `.claude/skills/messaging-channels/`（含 Telegram 與 Meta 的平台速查）。
 
 ---
 
@@ -240,10 +274,15 @@ examples/migrate_from_gemini.php  相容層遷移
 tools/verify_layout.php        wire payload 驗證（免費）
 tools/verify_cache.php         真實 API 快取驗證
 
-examples/n8n_webhook.php       n8n → 客服後端的橋接端點
+通訊軟體通道（自建，零第三方套件）
+src/Channel/                   平台轉接：Channel 介面 + Telegram / Messenger 實作
+src/Flow/                      流程引擎：Flow + Step + 現成的 6 個 step
+src/Store/                     跨 process 的小狀態（去重、限流）
+src/Http/                      最小 HTTP 出口（FakeTransport 供測試用）
+examples/channel_server.php    正式入口：兩個通道共用一條 flow
+examples/broadcast.php         分批廣播（--dry-run 可離線試跑）
+tools/test_channels.php        53 項自我測試（免費、離線、不需 composer）
 
 .claude/skills/
-  n8n-api-integration/         n8n 串接共用地基 + workflow JSON 檢查工具
-  n8n-telegram/                Telegram Bot API + 2 個現成 workflow
-  n8n-facebook/                Meta Messenger / 粉專 + 2 個現成 workflow
+  messaging-channels/          通道層用法 + Telegram / Meta 平台速查
 ```
