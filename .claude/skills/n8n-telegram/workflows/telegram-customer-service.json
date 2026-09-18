@@ -1,0 +1,198 @@
+{
+  "name": "Telegram 客服機器人",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000001",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -180,
+        300
+      ],
+      "webhookId": "a7f3b1e0-0000-4000-8000-000000000101",
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      },
+      "notes": "匯入後要重新選一次憑證。一個 bot token 同時只能有一個 webhook。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 過濾 + 去重 + 攤平成好用的欄位。\n//\n// 為什麼把三件事放同一個節點：後面的 \"整理回覆並切段\" 要靠索引位置對回\n// chat id,中間多一個 IF 節點會讓 items 數量改變、索引對不上。\n\nconst staticData = $getWorkflowStaticData('global');\nstaticData.seenUpdates = staticData.seenUpdates || [];\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  const update = item.json;\n  const message = update.message;\n\n  // 貼圖、照片、加入群組通知都會進來,沒有 text 的一律跳過\n  if (!message || typeof message.text !== 'string' || message.text.trim() === '') continue;\n\n  // Telegram 沒收到 200 就會重送同一個 update_id\n  const id = String(update.update_id);\n  if (staticData.seenUpdates.includes(id)) continue;\n  staticData.seenUpdates.push(id);\n\n  out.push({\n    json: {\n      updateId: update.update_id,\n      // ★ 回訊息要用 chat.id,不是 from.id。群組裡兩者不同。\n      chatId: message.chat.id,\n      chatType: message.chat.type,\n      userId: message.from?.id ?? null,\n      userName: message.from?.username ?? message.from?.first_name ?? 'unknown',\n      text: message.text.trim(),\n      messageId: message.message_id,\n    },\n  });\n}\n\n// static data 只在執行結束後寫回,而且 queue mode 多 worker 不共享。\n// 流量大的正式環境請改用 Redis SET NX EX 或 DB 的 unique index。\nstaticData.seenUpdates = staticData.seenUpdates.slice(-500);\n\nreturn out;"
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000002",
+      "name": "接收、去重、過濾",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendChatAction",
+        "chatId": "={{ $json.chatId }}",
+        "action": "typing"
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000003",
+      "name": "送出打字中",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        300,
+        160
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "旁支,失敗不影響主線。typing 只持續 5 秒。"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CS_BACKEND_URL }}/n8n_webhook.php",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Shared-Secret",
+              "value": "={{ $env.CS_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: \"telegram\", customerId: \"TG-\" + $json.userId, question: $json.text, meta: { chatId: $json.chatId, userName: $json.userName } }) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000004",
+      "name": "呼叫客服後端",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        300,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "notes": "neverError + fullResponse：把 4xx/5xx 當資料往下流,才讀得到 statusCode。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 把後端回覆整理成可以直接送出的多則訊息。\n\nconst TELEGRAM_LIMIT = 4096;\nconst FALLBACK = '抱歉,系統忙線中,請稍後再試一次。';\n\nfunction splitMessage(text, limit = TELEGRAM_LIMIT) {\n  const chars = Array.from(String(text ?? ''));\n  if (chars.length === 0) return [];\n  if (chars.length <= limit) return [chars.join('')];\n\n  const chunks = [];\n  let rest = chars;\n\n  while (rest.length > limit) {\n    const windowText = rest.slice(0, limit).join('');\n    let cut = -1;\n\n    for (const [pattern, minRatio] of [\n      [/\\n\\n/g, 0.3],\n      [/\\n/g, 0.3],\n      [/[。！？!?](?=\\s|$)/g, 0.5],\n      [/\\s/g, 0.7],\n    ]) {\n      let last = -1;\n      for (const m of windowText.matchAll(pattern)) last = m.index + m[0].length;\n      if (last > limit * minRatio) { cut = Array.from(windowText.slice(0, last)).length; break; }\n    }\n    if (cut <= 0) cut = limit;\n\n    chunks.push(rest.slice(0, cut).join('').trimEnd());\n    rest = rest.slice(cut);\n    while (rest.length && /\\s/.test(rest[0])) rest = rest.slice(1);\n  }\n  if (rest.length) chunks.push(rest.join('').trimEnd());\n  return chunks.filter((c) => c.length > 0);\n}\n\n// HTTP 節點開了 fullResponse,所以輸出是 { body, headers, statusCode }。\n// 它的 items 跟 \"接收、去重、過濾\" 一對一且同序,所以可以用索引對回 chatId。\nconst sources = $('接收、去重、過濾').all();\nconst out = [];\n\n$input.all().forEach((item, i) => {\n  const chatId = sources[i]?.json.chatId;\n  if (chatId === undefined) return;\n\n  const status = item.json.statusCode ?? 200;\n  const ok = status >= 200 && status < 300;\n  const reply = ok ? (item.json.body?.reply ?? '') : '';\n\n  // 後端掛掉也要給使用者一個交代,不能讓訊息石沉大海\n  const text = reply.trim() === '' ? FALLBACK : reply;\n\n  splitMessage(text).forEach((chunk, part) => {\n    out.push({ json: { chatId, text: chunk, part: part + 1, backendStatus: status } });\n  });\n});\n\nreturn out;"
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000005",
+      "name": "整理回覆並切段",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        540,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000006",
+      "name": "回覆訊息",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        780,
+        380
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      },
+      "notes": "沒設 parse_mode = 純文字送出。LLM 的輸出最容易在 MarkdownV2 上 400。"
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "接收、去重、過濾",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "接收、去重、過濾": {
+      "main": [
+        [
+          {
+            "node": "送出打字中",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "呼叫客服後端",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "呼叫客服後端": {
+      "main": [
+        [
+          {
+            "node": "整理回覆並切段",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "整理回覆並切段": {
+      "main": [
+        [
+          {
+            "node": "回覆訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

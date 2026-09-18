@@ -172,6 +172,52 @@ $service->cacheStats();    // 累計，適合掛在 metrics 端點上
 
 ---
 
+## 通訊軟體通道：Telegram / Facebook
+
+客服後端做好之後，訊息要從哪裡進來？`.claude/skills/` 底下有三支
+Claude Code skill，把 n8n 串接這兩個平台的實作、限制與踩雷點都寫進去了：
+
+| Skill | 管什麼 |
+|---|---|
+| `n8n-api-integration` | 共用地基：webhook 接收與回應、credential、重試退避、冪等去重、workflow JSON 手寫格式、除錯順序 |
+| `n8n-telegram` | Telegram Bot API：收發訊息、inline 按鈕、4096 字切段、MarkdownV2 跳脫、429 `retry_after`、廣播節流 |
+| `n8n-facebook` | Meta：`hub.challenge` 驗證、`X-Hub-Signature-256` 驗簽、24 小時訊息視窗與 message tag、粉專留言自動回覆 |
+
+每支都附可直接匯入的 n8n workflow：
+
+```
+.claude/skills/n8n-telegram/workflows/telegram-customer-service.json
+.claude/skills/n8n-telegram/workflows/telegram-broadcast.json
+.claude/skills/n8n-facebook/workflows/messenger-customer-service.json
+.claude/skills/n8n-facebook/workflows/facebook-comment-autoreply.json
+```
+
+四個 workflow 都打同一支後端：`examples/n8n_webhook.php`。它收下 n8n 的 JSON，
+丟進 `ClaudeCustomerService`，回一個 `{"reply": "..."}`。
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... CS_SHARED_SECRET=$(openssl rand -hex 32) \
+  php -S 0.0.0.0:8080 -t examples
+```
+
+n8n 那邊設兩個環境變數 `CS_BACKEND_URL`、`CS_SHARED_SECRET`（與上面同一組），
+再照各 skill 的說明填 bot token / Page Access Token 即可。
+
+**快取分層在這裡一樣成立**：`systemPrompt` 與 `companyKnowledge` 是凍結的兩層，
+通道別（telegram / messenger）走 `turnInstruction`，不會動到已快取的前綴 ——
+所以 Telegram 與 Messenger 的流量**讀的是同一份公司知識庫快取**。
+
+匯入前記得先驗一次：
+
+```bash
+node .claude/skills/n8n-api-integration/scripts/lint-workflow.mjs \
+  .claude/skills/n8n-*/workflows/*.json
+```
+
+工具腳本本身也各自帶自我測試（`node <檔案>` 直接跑）。
+
+---
+
 ## 什麼時候才需要 RAG / tool use
 
 只有在公司資料超過 200K token、或大部分內容跟多數問題無關時才值得。
@@ -193,4 +239,11 @@ examples/basic.php             原生三層寫法
 examples/migrate_from_gemini.php  相容層遷移
 tools/verify_layout.php        wire payload 驗證（免費）
 tools/verify_cache.php         真實 API 快取驗證
+
+examples/n8n_webhook.php       n8n → 客服後端的橋接端點
+
+.claude/skills/
+  n8n-api-integration/         n8n 串接共用地基 + workflow JSON 檢查工具
+  n8n-telegram/                Telegram Bot API + 2 個現成 workflow
+  n8n-facebook/                Meta Messenger / 粉專 + 2 個現成 workflow
 ```

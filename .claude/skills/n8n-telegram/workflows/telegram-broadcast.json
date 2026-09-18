@@ -1,0 +1,196 @@
+{
+  "name": "Telegram 分批廣播（含 429 退避）",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a7f3b1e0-0000-4000-8000-000000000011",
+      "name": "手動執行",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -180,
+        300
+      ],
+      "notes": "要排程的話換成 Schedule Trigger。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 推播名單。正式環境換成 HTTP Request 打你的後端,或 Postgres / MySQL 節點。\n//\n// 回傳格式：每個 item 一位收件人。\n\nconst recipients = [\n  { chatId: 111111111, name: '範例使用者 A' },\n  { chatId: 222222222, name: '範例使用者 B' },\n];\n\nconst text = $json.text || '這是一則測試廣播。';\n\n// 每次重跑都從乾淨的統計開始\nconst staticData = $getWorkflowStaticData('global');\nstaticData.broadcast = { sent: 0, blocked: [], retry: [], startedAt: new Date().toISOString() };\n\nreturn recipients.map((r) => ({ json: { ...r, text } }));"
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000012",
+      "name": "取得推播名單",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 20,
+        "options": {}
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000013",
+      "name": "分批",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        300,
+        300
+      ],
+      "notes": "★ 輸出 0 = done(跑完)、輸出 1 = loop(每一批)。順序跟直覺相反,接錯線會一則都沒送。"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: $json.text }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000014",
+      "name": "送出訊息",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        540,
+        400
+      ],
+      "notes": "這裡用 HTTP Request 而不是 Telegram 節點,因為要讀 429 回應裡的 parameters.retry_after —— Telegram 節點會把錯誤直接丟出來。token 走 $env.TELEGRAM_BOT_TOKEN,不要寫死在這裡。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 把送出結果分成三類。三類的後續處理完全不同,混在一起是最常見的錯。\n//\n//   2xx        成功\n//   403        使用者封鎖了 bot → 終局錯誤,要從名單移除,重試永遠不會成功\n//   429 / 5xx  暫時性 → 照對方給的秒數等,之後重送\n\nconst staticData = $getWorkflowStaticData('global');\nstaticData.broadcast = staticData.broadcast || { sent: 0, blocked: [], retry: [] };\n\nconst sources = $('分批').all();\nlet waitSeconds = 1;   // 沒被限流時的基本節流：全域上限約 30 則/秒\n\n$input.all().forEach((item, i) => {\n  const chatId = sources[i]?.json.chatId;\n  const status = item.json.statusCode ?? 0;\n  const body = item.json.body ?? {};\n\n  if (status >= 200 && status < 300) {\n    staticData.broadcast.sent += 1;\n    return;\n  }\n\n  if (status === 403) {\n    // \"bot was blocked by the user\" / \"bot was kicked from the group\"\n    staticData.broadcast.blocked.push({ chatId, reason: body.description ?? '403' });\n    return;\n  }\n\n  staticData.broadcast.retry.push({ chatId, status, reason: body.description ?? '' });\n\n  if (status === 429) {\n    // ★ Telegram 直接告訴你要等幾秒。照它說的等,不要用固定間隔。\n    const retryAfter = body.parameters?.retry_after ?? 30;\n    waitSeconds = Math.max(waitSeconds, retryAfter);\n  }\n});\n\nreturn [{ json: { waitSeconds, progress: staticData.broadcast.sent } }];"
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000015",
+      "name": "分類送出結果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.waitSeconds }}",
+        "unit": "seconds"
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000016",
+      "name": "等待再送下一批",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        400
+      ],
+      "webhookId": "a7f3b1e0-0000-4000-8000-000000000116",
+      "notes": "被 429 時等對方指定的秒數,平時等 1 秒做基本節流。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const s = $getWorkflowStaticData('global').broadcast ?? { sent: 0, blocked: [], retry: [] };\n\nreturn [{\n  json: {\n    已送出: s.sent,\n    已封鎖: s.blocked.length,\n    待重送: s.retry.length,\n    封鎖名單: s.blocked,\n    重送名單: s.retry,\n    提醒: '封鎖名單要寫回你的資料庫並停止推播；重送名單請在限流解除後另跑一次。',\n  },\n}];"
+      },
+      "id": "a7f3b1e0-0000-4000-8000-000000000017",
+      "name": "彙整結果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        540,
+        180
+      ]
+    }
+  ],
+  "connections": {
+    "手動執行": {
+      "main": [
+        [
+          {
+            "node": "取得推播名單",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "取得推播名單": {
+      "main": [
+        [
+          {
+            "node": "分批",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "分批": {
+      "main": [
+        [
+          {
+            "node": "彙整結果",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "送出訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "送出訊息": {
+      "main": [
+        [
+          {
+            "node": "分類送出結果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "分類送出結果": {
+      "main": [
+        [
+          {
+            "node": "等待再送下一批",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待再送下一批": {
+      "main": [
+        [
+          {
+            "node": "分批",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

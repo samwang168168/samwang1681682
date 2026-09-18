@@ -1,0 +1,214 @@
+{
+  "name": "粉專留言自動回覆",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "fb-feed",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "b4c8d2f1-0000-4000-8000-000000000021",
+      "name": "Webhook 留言 (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        300
+      ],
+      "webhookId": "b4c8d2f1-0000-4000-8000-000000000121",
+      "notes": "後台 webhook 要訂閱 feed 欄位。rawBody 必開。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 驗簽 → 取出留言事件 → 過濾。\n//\n// ⚠️ 留言走的是 entry[].changes[],不是 entry[].messaging[]。\n//    同一個 webhook URL 兩種結構都會進來,不要假設。\n\nconst crypto = require('crypto');\n\nconst item = $input.first();\nconst raw = Buffer.from(item.binary.data.data, 'base64');\nconst signature = item.json.headers['x-hub-signature-256'];\n\nconst expected = 'sha256=' + crypto.createHmac('sha256', $env.META_APP_SECRET).update(raw).digest('hex');\nconst a = Buffer.from(signature ?? '');\nconst b = Buffer.from(expected);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n  throw new Error('X-Hub-Signature-256 驗證失敗');\n}\n\nconst payload = JSON.parse(raw.toString('utf8'));\nconst staticData = $getWorkflowStaticData('global');\nstaticData.seenComments = staticData.seenComments || [];\n\nconst out = [];\n\nfor (const entry of payload.entry ?? []) {\n  for (const change of entry.changes ?? []) {\n    if (change.field !== 'feed') continue;\n\n    const v = change.value ?? {};\n    if (v.item !== 'comment') continue;   // 還有 post / like / reaction\n    if (v.verb !== 'add') continue;        // edited / remove 不處理\n\n    // ★ 粉專自己的留言也會觸發 webhook。不濾掉 → 自動回覆會遞迴。\n    if (v.from?.id === entry.id) continue;\n\n    if (typeof v.message !== 'string' || v.message.trim() === '') continue;\n\n    if (staticData.seenComments.includes(v.comment_id)) continue;\n    staticData.seenComments.push(v.comment_id);\n\n    out.push({\n      json: {\n        commentId: v.comment_id,\n        postId: v.post_id,\n        fromId: v.from?.id,\n        fromName: v.from?.name ?? '',\n        message: v.message.trim(),\n      },\n    });\n  }\n}\n\nstaticData.seenComments = staticData.seenComments.slice(-500);\nreturn out;"
+      },
+      "id": "b4c8d2f1-0000-4000-8000-000000000022",
+      "name": "驗簽並取出留言",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CS_BACKEND_URL }}/n8n_webhook.php",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Shared-Secret",
+              "value": "={{ $env.CS_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: \"facebook_comment\", customerId: \"FB-\" + $json.fromId, question: $json.message, meta: { commentId: $json.commentId, postId: $json.postId } }) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "b4c8d2f1-0000-4000-8000-000000000023",
+      "name": "呼叫客服後端",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 把後端回覆組成「公開回覆」與「私訊」兩種文案。\n//\n// 公開回覆要簡短（留言串裡太長很吵）,細節走私訊。\n\nconst sources = $('驗簽並取出留言').all();\nconst out = [];\n\n$input.all().forEach((item, i) => {\n  const src = sources[i]?.json;\n  if (!src) return;\n\n  const status = item.json.statusCode ?? 200;\n  const ok = status >= 200 && status < 300;\n  const reply = (ok ? item.json.body?.reply : '') || '';\n\n  const publicText = reply.trim() === ''\n    ? `${src.fromName} 您好,我們已收到您的提問,稍後由客服私訊您 🙏`\n    : `${src.fromName} 您好,已私訊您完整說明 🙏`;\n\n  out.push({\n    json: {\n      commentId: src.commentId,\n      publicText,\n      privateText: reply.trim() === '' ? '您好,我們已收到您的提問,客服稍後回覆您。' : reply.slice(0, 2000),\n    },\n  });\n});\n\nreturn out;"
+      },
+      "id": "b4c8d2f1-0000-4000-8000-000000000024",
+      "name": "組出回覆文案",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v23.0/{{ $json.commentId }}/comments",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $env.PAGE_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.publicText }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "b4c8d2f1-0000-4000-8000-000000000025",
+      "name": "公開回覆留言",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v23.0/{{ $json.commentId }}/private_replies",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $env.PAGE_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.privateText }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "b4c8d2f1-0000-4000-8000-000000000026",
+      "name": "私訊留言者",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        400
+      ],
+      "notes": "★ private_replies 每則留言只能用一次,第二次回 code 10903。留言者若從未與粉專互動也可能失敗。"
+    }
+  ],
+  "connections": {
+    "Webhook 留言 (POST)": {
+      "main": [
+        [
+          {
+            "node": "驗簽並取出留言",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "驗簽並取出留言": {
+      "main": [
+        [
+          {
+            "node": "呼叫客服後端",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "呼叫客服後端": {
+      "main": [
+        [
+          {
+            "node": "組出回覆文案",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "組出回覆文案": {
+      "main": [
+        [
+          {
+            "node": "公開回覆留言",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "私訊留言者",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
