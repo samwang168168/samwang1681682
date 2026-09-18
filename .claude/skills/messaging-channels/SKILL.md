@@ -175,7 +175,13 @@ assertSame(['chat_id' => '555', 'text' => '您好'], $transport->lastBody());
 
 ## 平台細節
 
-- `references/telegram-bot-api.md` —— method、欄位、限制數值、錯誤碼、`setWebhook` 參數
-- `references/messenger-api.md` —— 端點、訊息模板、24 小時視窗與 message tag、錯誤碼、頻率限制
+兩份平台速查放在 `openclaw/` 底下（同時供 OpenClaw 的 fb / tg agent 使用）：
+
+- `openclaw/agents/tg/skills/telegram-bot/references/telegram-bot-api.md`
+  —— method、欄位、限制數值、錯誤碼、`setWebhook` 全部參數
+- `openclaw/agents/fb/skills/fb-messenger/references/messenger-api.md`
+  —— 端點、訊息模板、24 小時視窗與 message tag、錯誤碼、頻率限制
 
 兩份都是純平台知識，跟本專案的實作無關，可以直接查。
+同一層的 `SKILL.md` 是各平台的整合要點（給 OpenClaw agent 讀的版本），
+內容與這裡一致，只是拆成兩個平台各自獨立。

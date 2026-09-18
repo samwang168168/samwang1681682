@@ -1,0 +1,30 @@
+// 要合併進 ~/.openclaw/openclaw.json（JSON5）的片段。
+//
+// ⚠️ 這是「片段」，不是完整設定檔 —— 直接覆蓋過去會清掉你原本的其他設定。
+//    建議用 install.sh（走 openclaw CLI，不動你的檔案格式與註解），
+//    或手動把 agents.entries 底下的兩個 key 併進既有的設定裡。
+{
+  agents: {
+    entries: {
+      // ── Facebook / Meta 研究 ──────────────────────────────
+      fb: {
+        name: "fb skill研究",
+        // 工作區決定這個 agent 讀得到哪些 skill：
+        // <workspace>/skills 是最高優先序的 skill 來源。
+        workspace: "~/.openclaw/workspace-fb",
+        agentDir: "~/.openclaw/agents/fb/agent",
+        // 用你 OpenClaw 裡實際可用的 model id，這行沒把握就整行刪掉，
+        // 會自動沿用 agents.defaults.model。
+        model: "anthropic/claude-opus-5",
+      },
+
+      // ── Telegram 研究 ────────────────────────────────────
+      tg: {
+        name: "telegram skill研究",
+        workspace: "~/.openclaw/workspace-tg",
+        agentDir: "~/.openclaw/agents/tg/agent",
+        model: "anthropic/claude-opus-5",
+      },
+    },
+  },
+}

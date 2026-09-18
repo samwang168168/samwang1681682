@@ -248,7 +248,8 @@ php tools/test_channels.php
 而不只是回傳值 —— 通訊軟體整合最常見的錯是「body 少一個必填欄位」，
 那種錯從回傳值看一切正常，只有看 wire payload 才抓得到。
 
-更多細節在 `.claude/skills/messaging-channels/`（含 Telegram 與 Meta 的平台速查）。
+更多細節在 `.claude/skills/messaging-channels/`。
+平台速查與 OpenClaw 的兩個研究用 agent 在 `openclaw/`（見該目錄的 README）。
 
 ---
 
@@ -284,5 +285,10 @@ examples/broadcast.php         分批廣播（--dry-run 可離線試跑）
 tools/test_channels.php        53 項自我測試（免費、離線、不需 composer）
 
 .claude/skills/
-  messaging-channels/          通道層用法 + Telegram / Meta 平台速查
+  messaging-channels/          通道層用法（給 Claude Code 讀）
+
+openclaw/                      OpenClaw 的 fb / tg 兩個研究用 agent
+  install.sh                   建立 agent 並把 skill 放進各自工作區
+  agents/fb/skills/fb-messenger/    Meta 整合要點 + 平台速查
+  agents/tg/skills/telegram-bot/    Telegram 整合要點 + 平台速查
 ```
