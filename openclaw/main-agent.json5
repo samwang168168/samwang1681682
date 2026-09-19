@@ -1,8 +1,10 @@
-// OpenClaw：讓 main agent 回答時，文字之外一起附上 mp3 語音
+// OpenClaw main agent 設定：
+//   1. 回答時，文字之外一起附上 mp3 語音
+//   2. 模型用 anthropic/claude-opus-5
 //
 // 這是一份「要併進 ~/.openclaw/openclaw.json 的片段」，不是完整設定檔。
 // 直接整份覆蓋會把你原本的 channels / models / bindings 全部洗掉。
-// 用 `php tools/openclaw_apply_tts.php` 做深層合併，或照 openclaw/README.md 手動併。
+// 用 `php tools/openclaw_apply_agent.php` 做深層合併，或照 openclaw/README.md 手動併。
 //
 // 分兩層是刻意的：
 //   tts.*                      -> 共用的 provider、金鑰、輸出格式
@@ -32,6 +34,11 @@
   agents: {
     entries: {
       main: {
+        // 字串形式 = 嚴格指定 primary，不做 model fallback。
+        // 要容錯改成 { primary: "anthropic/claude-opus-5", fallbacks: ["anthropic/claude-sonnet-5"] }。
+        model: "anthropic/claude-opus-5",
+        // Opus 5 預設就是 adaptive thinking + high effort；明寫是為了不被 agents.defaults 蓋掉。
+        thinkingDefault: "high",
         tts: {
           // "always" = 每則最終回覆都合成語音；文字照常送，語音當附件跟著走。
           auto: "always",

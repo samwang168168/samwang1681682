@@ -3,29 +3,43 @@
 declare(strict_types=1);
 
 /**
- * 把「main agent 回答時附上 mp3 語音」的設定，深層合併進 OpenClaw 的設定檔。
+ * 把 main agent 的兩項設定深層合併進 OpenClaw 的設定檔：
+ *   1. 回答時附上 mp3 語音（Auto-TTS）
+ *   2. 模型指定為 anthropic/claude-opus-5
  *
  * 跑法：
- *   php tools/openclaw_apply_tts.php --dry-run          # 只印合併後的結果，不寫檔
- *   php tools/openclaw_apply_tts.php                    # 寫入，寫之前自動備份
- *   php tools/openclaw_apply_tts.php --provider=openai  # 改用 OpenAI TTS
- *   php tools/openclaw_apply_tts.php --agent=support --config=/path/openclaw.json
+ *   php tools/openclaw_apply_agent.php --dry-run          # 只印合併後的結果，不寫檔
+ *   php tools/openclaw_apply_agent.php                    # 寫入，寫之前自動備份
+ *   php tools/openclaw_apply_agent.php --provider=openai  # 改用 OpenAI TTS
+ *   php tools/openclaw_apply_agent.php --model=anthropic/claude-sonnet-5
+ *   php tools/openclaw_apply_agent.php --skip-model       # 只改語音，不動模型
+ *   php tools/openclaw_apply_agent.php --agent=support --config=/path/openclaw.json
  *
  * 為什麼不直接覆蓋檔案：openclaw.json 裡面還有 channels、models、bindings，
- * 整份蓋掉等於把整台 gateway 的設定清空。這支只動 tts 與 agents.entries.<agent>.tts
- * 兩條路徑，其餘原封不動。
+ * 整份蓋掉等於把整台 gateway 的設定清空。這支只動 tts 與
+ * agents.entries.<agent> 底下的 tts / model / thinkingDefault，其餘原封不動。
  */
 
-$options = getopt('', ['config::', 'agent::', 'provider::', 'dry-run', 'help']);
+$options = getopt('', ['config::', 'agent::', 'provider::', 'model::', 'skip-model', 'dry-run', 'help']);
 
 if (isset($options['help'])) {
-    fwrite(STDOUT, "用法：php tools/openclaw_apply_tts.php [--config=路徑] [--agent=main] [--provider=microsoft|openai] [--dry-run]\n");
+    fwrite(STDOUT, "用法：php tools/openclaw_apply_agent.php [--config=路徑] [--agent=main] [--provider=microsoft|openai] [--model=provider/model] [--skip-model] [--dry-run]\n");
     exit(0);
 }
 
 $agent = (string) ($options['agent'] ?? 'main');
 $provider = (string) ($options['provider'] ?? 'microsoft');
 $dryRun = array_key_exists('dry-run', $options);
+$skipModel = array_key_exists('skip-model', $options);
+
+// OpenClaw 的模型 ref 是 provider/model。anthropic/claude-opus-5 預設就是
+// adaptive thinking + high effort，1M context / 128K output。
+$model = (string) ($options['model'] ?? 'anthropic/claude-opus-5');
+
+if (!$skipModel && !str_contains(trim($model, '/'), '/')) {
+    fwrite(STDERR, "--model 要用 provider/model 的完整寫法，例如 anthropic/claude-opus-5\n");
+    exit(2);
+}
 
 if (!in_array($provider, ['microsoft', 'openai'], true)) {
     fwrite(STDERR, "--provider 只支援 microsoft 或 openai（其他 provider 請照 openclaw/README.md 手動併）\n");
@@ -77,6 +91,14 @@ $patch = [
     ],
 ];
 
+if (!$skipModel) {
+    // 字串形式 = 嚴格指定 primary、不做 model fallback。
+    // 要容錯就改成 ['primary' => $model, 'fallbacks' => [...]]。
+    $patch['agents']['entries'][$agent]['model'] = $model;
+    // Opus 5 的預設 effort 就是 high，這裡明寫是為了不被 agents.defaults 蓋掉。
+    $patch['agents']['entries'][$agent]['thinkingDefault'] = 'high';
+}
+
 $existing = readConfig($configPath);
 $merged = deepMerge($existing, $patch);
 
@@ -113,15 +135,18 @@ if (file_put_contents($configPath, $json) === false) {
     exit(1);
 }
 
+$summary = "  tts.provider = {$provider}\n"
+    . "  agents.entries.{$agent}.tts.auto = always（每則最終回覆都附語音，格式 mp3）\n"
+    . ($skipModel ? "  （--skip-model：沒有動模型設定）\n" : "  agents.entries.{$agent}.model = {$model}（thinkingDefault: high）\n");
+
 fwrite(STDOUT, <<<TXT
 已寫入：{$configPath}
-  tts.provider = {$provider}
-  agents.entries.{$agent}.tts.auto = always（每則最終回覆都附語音，格式 mp3）
-
+{$summary}
 接著做：
   1. 重新載入 gateway：openclaw gateway restart（或 openclaw doctor 檢查設定）
-  2. 在聊天室輸入 /tts status 確認 provider 與 auto 狀態
-  3. /tts audio 測試一下語音 —— 應該收到 mp3
+  2. openclaw models list --provider anthropic 確認模型可用
+  3. 在聊天室輸入 /tts status 確認 provider 與 auto 狀態
+  4. /tts audio 測試一下語音 —— 應該收到 mp3
 
 TXT);
 
@@ -153,7 +178,7 @@ function readConfig(string $path): array
     if (!is_array($decoded)) {
         fwrite(STDERR, <<<TXT
 {$path} 不是這支腳本能安全處理的 JSON（可能含有 JSON5 註解或尾逗號）。
-沒有動它。請改用 openclaw/tts-main.json5 手動把兩個區塊併進去，
+沒有動它。請改用 openclaw/main-agent.json5 手動把兩個區塊併進去，
 或先跑 `openclaw doctor --fix` 把設定正規化後再試一次。
 
 TXT);

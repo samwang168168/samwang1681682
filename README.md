@@ -193,13 +193,14 @@ examples/basic.php             原生三層寫法
 examples/migrate_from_gemini.php  相容層遷移
 tools/verify_layout.php        wire payload 驗證（免費）
 tools/verify_cache.php         真實 API 快取驗證
-openclaw/                      OpenClaw main agent 語音回覆（mp3）設定
-tools/openclaw_apply_tts.php   把語音設定併進 openclaw.json
+openclaw/                      OpenClaw main agent 設定（mp3 語音回覆 + Opus 5）
+tools/openclaw_apply_agent.php 把上述設定併進 openclaw.json
 ```
 
 ---
 
 ## 附：OpenClaw 語音回覆
 
-如果客服也走 OpenClaw，`openclaw/` 底下有讓 main agent 在文字之外
-附上 mp3 語音的設定與合併腳本，細節看 [openclaw/README.md](openclaw/README.md)。
+如果客服也走 OpenClaw，`openclaw/` 底下有 main agent 的設定與合併腳本：
+文字之外附上 mp3 語音、模型指定 `anthropic/claude-opus-5`，
+細節看 [openclaw/README.md](openclaw/README.md)。
