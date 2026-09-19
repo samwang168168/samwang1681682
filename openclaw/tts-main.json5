@@ -1,0 +1,52 @@
+// OpenClaw：讓 main agent 回答時，文字之外一起附上 mp3 語音
+//
+// 這是一份「要併進 ~/.openclaw/openclaw.json 的片段」，不是完整設定檔。
+// 直接整份覆蓋會把你原本的 channels / models / bindings 全部洗掉。
+// 用 `php tools/openclaw_apply_tts.php` 做深層合併，或照 openclaw/README.md 手動併。
+//
+// 分兩層是刻意的：
+//   tts.*                      -> 共用的 provider、金鑰、輸出格式
+//   agents.entries.main.tts.*  -> 只有 main 這隻 agent 自動發語音
+// 後面那層會 deep-merge 蓋在前面那層上，所以其他 agent 不受影響。
+{
+  tts: {
+    // 這裡不寫 auto，維持原本的值（預設 "off"）—— 只讓 main 開口。
+    mode: "final",
+    provider: "microsoft",
+    maxTextLength: 4096,
+    providers: {
+      // Microsoft（Edge 神經語音）不需要 API key，預設就吐 mp3，
+      // 對中文客服回覆來說是最省事的起點。
+      microsoft: {
+        enabled: true,
+        speakerVoice: "zh-CN-XiaoxiaoNeural",
+        lang: "zh-CN",
+        // 關鍵：mp3。24kHz / 48kbps 單聲道，語音夠清楚、檔案夠小。
+        outputFormat: "audio-24khz-48kbitrate-mono-mp3",
+        rate: "+0%",
+        pitch: "+0%",
+      },
+    },
+  },
+
+  agents: {
+    entries: {
+      main: {
+        tts: {
+          // "always" = 每則最終回覆都合成語音；文字照常送，語音當附件跟著走。
+          auto: "always",
+          // "final" = 只念最後的答案，不念工具/中間區塊的輸出。
+          mode: "final",
+          provider: "microsoft",
+          providers: {
+            microsoft: {
+              speakerVoice: "zh-CN-XiaoxiaoNeural",
+              lang: "zh-CN",
+              outputFormat: "audio-24khz-48kbitrate-mono-mp3",
+            },
+          },
+        },
+      },
+    },
+  },
+}
